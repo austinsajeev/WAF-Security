@@ -1,155 +1,162 @@
-# =============================================================================
-# AegisAI-X Phase 1 — Deployment Guide
-# =============================================================================
+# AegisAI-X — AI-Powered Web Application Firewall Security Platform
+
+AegisAI-X is a full-stack, enterprise-grade Web Application Firewall (WAF) security platform that combines real-time traffic inspection, machine learning anomaly detection, automated incident management, and a live Security Operations Center (SOC) dashboard. It is designed to protect multiple websites simultaneously and automatically respond to attacks without human intervention.
+
+---
+
+## What It Does
+
+- Blocks malicious web traffic in real time — SQL Injection, XSS, DDoS, Brute Force, LFI, and scanner attacks
+- Collects and stores every HTTP request across all protected sites for analysis
+- Detects behavioral anomalies using an Isolation Forest machine learning model
+- Automatically raises security incidents and sends alerts to SOC analysts
+- Auto-blocks high-confidence attacking IPs at the network edge
+- Provides a live SOC dashboard for incident investigation and response
+
+---
+
+## Core Components
+
+### Gateway (Nginx + ModSecurity)
+Every HTTP request passes through Nginx with ModSecurity v3 and the OWASP Core Rule Set v4. Each request is scored for attack patterns and either blocked or logged with a structured JSON record.
+
+### Log Pipeline (Filebeat + Redis + HMAC Worker)
+Filebeat ships logs in real-time, signing each event with HMAC-SHA256 to prevent tampering. A Python worker consumes events from Redis, verifies signatures, normalizes fields, and stores them in ClickHouse.
+
+### Feature Builder & Geo Enricher
+Workers aggregate per-IP behavioral statistics (request rate, error rate, unique endpoints visited, attack percentage) and enrich IPs with country and ASN data.
+
+### ML Anomaly Detection — Phase 3
+An Isolation Forest model (scikit-learn) runs every 15 minutes, training on IP behavior features and scoring all active IPs. The top 3% most anomalous IPs are flagged as outliers and cached in Redis for real-time lookup.
+
+### Correlation Engine
+Runs every 30 seconds, evaluating configurable alert rules against ClickHouse data. It groups many raw events into a single incident, applies a confidence score (boosted by the ML outlier scores), and automatically blocks IPs with confidence ≥ 75%. Alerts are sent via Slack and email.
+
+### FastAPI Backend
+A production-grade REST API with JWT authentication, TOTP-based multi-factor authentication (MFA), and role-based access control (admin, analyst, viewer). It serves live analytics from ClickHouse and manages incidents and the IP blocklist.
+
+### SOC Dashboard (React + Vite)
+A live frontend with pages for attack overview, incident management, IP blocklist control, per-site summaries, and ML model health status.
+
+### Observability (Prometheus + Grafana)
+All workers expose Prometheus metrics. Grafana dashboards cover SOC overview, node health, pipeline ingestion rates, and ML training status.
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Gateway / WAF | Nginx 1.25+, ModSecurity v3, OWASP CRS v4 |
+| Log Shipping | Filebeat 8.x |
+| Message Queue | Redis 7 |
+| Time-Series Database | ClickHouse 23.8 |
+| Relational Database | PostgreSQL 16 |
+| Pipeline Workers | Python 3.11 |
+| ML / AI | scikit-learn (Isolation Forest), pandas, joblib |
+| API | FastAPI, JWT, TOTP MFA, bcrypt, slowapi |
+| Frontend | React 18, Vite |
+| Metrics | Prometheus 2.52, Grafana 10.4 |
+| Deployment | Docker Compose, Ansible |
+
+---
+
+## Security Design
+
+- **Log Integrity** — Every log event is HMAC-SHA256 signed at the gateway. Tampered events are dropped before ingestion.
+- **Zero-Trust Auth** — All API access requires JWT. MFA (TOTP) is supported per user. Tokens are revocable via Redis.
+- **RBAC + Site Isolation** — Analysts can only access incidents for their assigned sites. Admins have full access.
+- **mTLS Between Nodes** — Gateway nodes use mutual TLS with a private internal CA for secure communication.
+- **Rate Limiting** — Login is limited to 5 attempts/minute and MFA to 3 attempts/minute per IP.
+- **Secrets Management** — All credentials are loaded from environment variables. No secrets are committed to version control.
+- **Auto-Response** — High-confidence incidents trigger automatic IP blocking without requiring human approval.
+
+---
+
+## Deployment
+
+The project is containerized with Docker Compose for local development and testing. Production deployments use Ansible with a canary rollout strategy — starting with 2 pilot servers, then expanding to full production after a review gate.
+
+### Quick Start (Local)
+
+```bash
+# Copy and fill in your secrets
+cp .env.example .env
+
+# Start all services
+docker compose up -d
+```
+
+Services available after startup:
+
+| Service | URL |
+|---|---|
+| SOC Dashboard | http://localhost:3000 |
+| API (Swagger Docs) | http://localhost:8000/api/docs |
+| Grafana | http://localhost:3001 |
+| Prometheus | http://localhost:9090 |
+
+---
+
+## Detection Capabilities
+
+| Attack Type | Detection Method |
+|---|---|
+| SQL Injection | ModSecurity CRS + HMAC worker heuristics |
+| Cross-Site Scripting (XSS) | ModSecurity CRS + heuristics |
+| Local File Inclusion (LFI) | ModSecurity CRS + heuristics |
+| Brute Force / Credential Stuffing | Correlation Engine (auth failure rate rule) |
+| DDoS / Traffic Spike | Correlation Engine (3× baseline threshold) |
+| Multi-Site Campaigns | Correlation Engine (cross-site IP / User-Agent rules) |
+| Behavioral Anomalies | ML Isolation Forest (Phase 3) |
+| Sensitive Path Scanning | HMAC worker heuristics (.env, .git, admin probes) |
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and configure the following before running:
+
+```
+AEGISAI_HMAC_SECRET   — HMAC signing key for log integrity
+JWT_SECRET            — Secret for JWT token signing
+CH_PASSWORD           — ClickHouse database password
+PG_PASSWORD           — PostgreSQL database password
+SLACK_WEBHOOK_URL     — (Optional) Slack webhook for incident alerts
+SMTP_HOST / SMTP_USER / SMTP_PASS / ALERT_EMAIL — (Optional) Email alerts
+```
+
+---
 
 ## Project Structure
 
 ```
 aegisai-x/
-├── gateway/
-│   ├── nginx/
-│   │   ├── nginx.conf                        # A. Main Nginx config
-│   │   ├── sites-available/
-│   │   │   └── site_template.conf            # A. Per-site vhost template
-│   │   └── modsecurity/
-│   │       └── modsec_main.conf              # A. ModSecurity WAF config
-│   └── filebeat/
-│       └── filebeat.yml                      # C. Log shipping agent
-├── storage/
-│   └── clickhouse/
-│       └── schema.sql                        # B. ClickHouse tables + views
-├── ansible/
-│   └── deploy_gateway.yml                    # D. Canary → full rollout
-└── observability/
-    └── prometheus/
-        ├── prometheus.yml                    # E. Metrics scrape config
-        └── rules/
-            └── gateway_alerts.yml            # E. Alert rules
+├── backend/          # FastAPI REST API
+├── dashboard/        # React + Vite SOC frontend
+├── gateway/          # Nginx config, ModSecurity rules, Filebeat config
+├── pipeline/         # Python workers (HMAC, ML, Correlation, Geo, Features, Blocklist)
+├── storage/          # ClickHouse and PostgreSQL schemas
+├── observability/    # Prometheus config, alert rules, Grafana dashboards
+├── ansible/          # Production deployment playbook
+├── tools/            # Attack simulation and validation scripts
+├── docs/             # WAF promotion checklist
+├── docker-compose.yml
+└── .env.example
 ```
 
 ---
 
-## Prerequisites
+## Roadmap
 
-| Component | Version | Install |
-|---|---|---|
-| Nginx | 1.25+ | `apt install nginx` |
-| ModSecurity | 3.x | `apt install libmodsecurity3 libmodsecurity-dev` |
-| OWASP CRS | 4.x | `apt install modsecurity-crs` |
-| Filebeat | 8.x | [elastic.co/downloads](https://www.elastic.co/downloads/beats/filebeat) |
-| ClickHouse | 24.x | [clickhouse.com/docs](https://clickhouse.com/docs/en/install) |
-| Ansible | 2.15+ | `pip install ansible` |
-| Prometheus | 2.50+ | [prometheus.io/download](https://prometheus.io/download/) |
+- **Phase 1** — Gateway deployment, log ingestion, ClickHouse schema, Prometheus
+- **Phase 2** — Correlation engine, incident lifecycle, alerting
+- **Phase 3** — AI/ML anomaly detection (Isolation Forest) ✅
+- **Phase 4** — Active edge enforcement (auto-blocking at Nginx from ML + Correlation) ✅
+- **Phase 5** — Threat intelligence feed integration, GeoIP blocking policies
 
 ---
 
-## Phase 1 Deployment Order
+## License
 
-### Step 1 — PKI Setup (do this FIRST)
-Generate the internal CA and per-node certificates for mTLS.
-
-```bash
-# On Central Server — create CA
-openssl genrsa -out ca.key 4096
-openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
-    -out ca.crt -subj "/CN=AegisAI-X Internal CA"
-
-# Per gateway node — generate and sign node cert
-openssl genrsa -out gateway-node1.key 2048
-openssl req -new -key gateway-node1.key \
-    -out gateway-node1.csr -subj "/CN=gateway-node1"
-openssl x509 -req -in gateway-node1.csr -CA ca.crt -CAkey ca.key \
-    -CAcreateserial -out gateway-node1.crt -days 365
-
-# Distribute: ca.crt to ALL nodes, node-specific crt+key to each node
-# Store in: /etc/aegisai/pki/
-```
-
-### Step 2 — ClickHouse Schema
-```bash
-# On Central Server
-clickhouse-client --multiquery < storage/clickhouse/schema.sql
-```
-
-### Step 3 — Deploy Gateway (2 pilot servers via Ansible)
-```bash
-# Test on 2 servers first before canary rollout
-ansible-playbook -i inventories/pilot.ini deploy_gateway.yml \
-    -e "aegisai_version=1.0.0"
-```
-
-### Step 4 — Canary Rollout (10 servers)
-```bash
-ansible-playbook -i inventories/production.ini deploy_gateway.yml \
-    -e "aegisai_version=1.0.0"
-# Watch Grafana dashboard during the 5-minute review gate
-```
-
-### Step 5 — Full Rollout
-```bash
-# Set auto_rollout=true to skip the human review pause
-ansible-playbook -i inventories/production.ini deploy_gateway.yml \
-    -e "aegisai_version=1.0.0" \
-    -e "auto_rollout=true"
-```
-
-### Step 6 — Prometheus + Alertmanager
-```bash
-# On Central Server
-cp observability/prometheus/prometheus.yml /etc/prometheus/
-cp observability/prometheus/rules/*.yml /etc/prometheus/rules/
-systemctl restart prometheus
-```
-
----
-
-## Adding a New Website
-
-1. Copy `gateway/nginx/sites-available/site_template.conf`
-2. Replace all `{{ PLACEHOLDERS }}`
-3. Commit to Git
-4. Deploy via Ansible: `ansible-playbook deploy_gateway.yml -l <server>`
-
----
-
-## Rollback
-
-```bash
-ansible-playbook -i inventories/production.ini deploy_gateway.yml \
-    -e "rollback=true" \
-    -e "rollback_version=1.0.0"
-```
-
----
-
-## Environment Variables (set per gateway node in `/etc/aegisai/gateway.env`)
-
-```bash
-SITE_ID=site_042
-AEGISAI_HMAC_SECRET=<256-bit-secret>
-# HOSTNAME is set automatically by OS
-```
-
----
-
-## WAF Tuning (Phase 3 prerequisite)
-
-After 2 weeks in `DetectionOnly` mode:
-1. Review false positives in ClickHouse: `SELECT rule_id, count() FROM waf_events GROUP BY rule_id ORDER BY count() DESC`
-2. Add exclusions in `modsec_main.conf` for known-good traffic
-3. Change `SecRuleEngine DetectionOnly` → `SecRuleEngine On`
-4. Deploy change via Ansible canary rollout
-
----
-
-## Key Dashboards (Grafana)
-
-| Dashboard | Purpose |
-|---|---|
-| **AegisAI — SOC Overview** | Per-site attack counts, top IPs, WAF block rate |
-| **AegisAI — Node Health** | Per-gateway CPU, latency, Filebeat lag |
-| **AegisAI — Pipeline** | ClickHouse insert rate, disk usage, query latency |
-
----
-
-> **Next Phase**: After 30 days of stable data, proceed to Phase 2 (Alerting Engine + Incident Lifecycle) and Phase 3 (AI/ML Anomaly Detection).
+This project is for internal security infrastructure use.
