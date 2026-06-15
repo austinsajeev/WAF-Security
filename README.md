@@ -77,7 +77,7 @@ All workers expose Prometheus metrics. Grafana dashboards cover SOC overview, no
 
 The project is containerized with Docker Compose for local development and testing. Production deployments use Ansible with a canary rollout strategy — starting with 2 pilot servers, then expanding to full production after a review gate.
 
-### Quick Start (Local)
+### Quick Start
 
 ```bash
 # Copy and fill in your secrets
@@ -86,15 +86,6 @@ cp .env.example .env
 # Start all services
 docker compose up -d
 ```
-
-Services available after startup:
-
-| Service | URL |
-|---|---|
-| SOC Dashboard | http://localhost:3000 |
-| API (Swagger Docs) | http://localhost:8000/api/docs |
-| Grafana | http://localhost:3001 |
-| Prometheus | http://localhost:9090 |
 
 ---
 
