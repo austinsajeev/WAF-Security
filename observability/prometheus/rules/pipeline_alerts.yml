@@ -1,0 +1,171 @@
+groups:
+
+  # ===========================================================================
+  # Group: Pipeline Worker Health (NEW — Phase 2.5)
+  # Detects silent worker failures that leave detection dead
+  # ===========================================================================
+  - name: pipeline_workers
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Correlation engine stopped polling (detection is DEAD)
+      # This is the most dangerous failure mode — logs still flow but
+      # incidents stop being created. No visible signs of failure.
+      # -----------------------------------------------------------------------
+      - alert: CorrelationEngineDead
+        expr: |
+          (time() - aegisai_correlation_last_poll_timestamp) > 120
+          OR absent(aegisai_correlation_last_poll_timestamp)
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 CRITICAL: Correlation engine is DEAD"
+          description: |
+            The correlation engine has not completed a poll cycle in >2 minutes.
+            IMPACT: New incidents are NOT being created. Detection is offline.
+            Last poll was {{ $value | humanizeDuration }} ago.
+            Action: sudo systemctl restart aegisai-correlation
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Blocklist sync worker stopped (gateway blocks are stale)
+      # -----------------------------------------------------------------------
+      - alert: BlocklistSyncWorkerDead
+        expr: |
+          (time() - aegisai_blocklist_last_sync_timestamp) > 60
+          OR absent(aegisai_blocklist_last_sync_timestamp)
+        for: 1m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 CRITICAL: Blocklist sync worker is DEAD"
+          description: |
+            IP blocklist has not been synced to Redis/Nginx in >1 minute.
+            IMPACT: Newly blocked IPs are NOT being blocked at the gateway.
+            Action: sudo systemctl restart aegisai-blocklist-sync
+
+      # -----------------------------------------------------------------------
+      # WARNING: HMAC worker rejection rate spiking (potential attack on pipeline)
+      # -----------------------------------------------------------------------
+      - alert: HighHMACRejectionRate
+        expr: |
+          rate(aegisai_hmac_rejected_total[5m]) > 10
+        for: 3m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "⚠️ High HMAC rejection rate — possible log injection attempt"
+          description: |
+            >10 HMAC rejections/min sustained for 3 minutes.
+            Could indicate: tampered log agent, replay attack, or misconfigured node.
+            Check dead_letter_queue table for rejected log details.
+
+      # -----------------------------------------------------------------------
+      # WARNING: Correlation poll cycle taking too long
+      # (DB query performance degrading under load)
+      # -----------------------------------------------------------------------
+      - alert: CorrelationPollSlow
+        expr: |
+          histogram_quantile(0.95,
+            rate(aegisai_correlation_poll_duration_seconds_bucket[10m])
+          ) > 25
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "⚠️ Correlation engine poll taking >25s (p95)"
+          description: |
+            Correlation poll cycle p95 latency: {{ $value | humanizeDuration }}
+            Should complete in <30s. Current value is dangerously close to poll interval.
+            Check: ClickHouse query performance, DB connections, network.
+
+      # -----------------------------------------------------------------------
+      # INFO: No incidents created in past hour (may indicate dead detection)
+      # -----------------------------------------------------------------------
+      - alert: NoIncidentsCreated
+        expr: |
+          increase(aegisai_incidents_created_total[1h]) == 0
+        for: 0m    # fire immediately — informational only
+        labels:
+          severity: info
+          team: security
+        annotations:
+          summary: "ℹ️ No incidents created in the last hour"
+          description: |
+            Could mean: (a) no attacks occurring, or (b) detection silently broken.
+            Cross-check: Is WAF receiving traffic? Are waf_events being inserted?
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: HMAC worker has stopped processing events
+      # -----------------------------------------------------------------------
+      - alert: HMACWorkerDead
+        expr: |
+          absent(aegisai_hmac_processed_total)
+          OR increase(aegisai_hmac_processed_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 CRITICAL: HMAC worker is DEAD — ingestion halted"
+          description: |
+            No events processed by HMAC worker in >2 minutes.
+            IMPACT: ALL log ingestion stopped. ClickHouse data is stale.
+            Action: docker-compose restart hmac_worker
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Dead letter rate too high (pipeline quality degraded)
+      # -----------------------------------------------------------------------
+      - alert: HighDeadLetterRate
+        expr: |
+          aegisai_dead_letter_rate > 0.20
+        for: 5m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 CRITICAL: Dead letter rate >20% — pipeline quality degraded"
+          description: |
+            More than 20% of events are being rejected to dead_letter_queue.
+            Current rate: {{ $value | humanizePercentage }}
+            Check: HMAC secret consistency, nonce TTL, clock skew between nodes.
+            Query: SELECT reject_reason, count() FROM dead_letter_queue GROUP BY reject_reason
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: ClickHouse inserts failing
+      # -----------------------------------------------------------------------
+      - alert: HighInsertFailureRate
+        expr: |
+          increase(aegisai_inserts_failed_total[5m]) > 3
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "🔴 CRITICAL: ClickHouse insert failures detected"
+          description: |
+            >3 failed inserts in 5 minutes (table: {{ $labels.table }}).
+            IMPACT: Security events are being LOST — not stored in ClickHouse.
+            Check: ClickHouse health, disk space, schema compatibility.
+
+      # -----------------------------------------------------------------------
+      # WARNING: Worker lag too high (events being processed late)
+      # -----------------------------------------------------------------------
+      - alert: HighWorkerLag
+        expr: |
+          aegisai_worker_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "⚠️ High worker lag — events processed >30s after timestamp"
+          description: |
+            Current lag: {{ $value | humanizeDuration }}
+            This means security events are being detected late.
+            Check: Redis stream backlog (aegisai_redis_stream_length), worker CPU.

@@ -1,0 +1,23 @@
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/aegisai_access.log
+      - /var/log/nginx/error.log
+    fields:
+      is_trusted: true
+    fields_under_root: true
+    json.keys_under_root: true
+    json.add_error_key: true
+
+    scan_frequency: 1s
+    ignore_older: 24h
+    close_inactive: 1h
+
+output.redis:
+  hosts: ["redis:6379"]
+  key: "aegisai:raw_logs"
+  datatype: "list"
+  db: 0
+
+logging.level: info

@@ -1,0 +1,70 @@
+{
+  "__inputs": [
+    { "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }
+  ],
+  "uid": "aegisai-ml-health",
+  "title": "AegisAI-X — ML Model Health",
+  "tags": ["aegisai", "ml"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Incidents Auto-Blocked Today",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "orange" }, { "value": 10, "color": "red" }] } } },
+      "targets": [{ "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_created_total[24h])", "legendFormat": "Auto-Blocked" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Rules Evaluated (30s)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } } },
+      "targets": [{ "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_rules_evaluated_total[30s])", "legendFormat": "Rules/cycle" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Incidents Updated (vs New)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } },
+      "targets": [{ "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_updated_total[5m])", "legendFormat": "Updated/5m" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Last Correlation Cycle (sec ago)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 60, "color": "yellow" }, { "value": 120, "color": "red" }] } } },
+      "targets": [{ "datasource": { "type": "prometheus" }, "expr": "time() - aegisai_correlation_last_poll_timestamp", "legendFormat": "Staleness" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Incidents by Attack Type",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 } } },
+      "targets": [
+        { "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_created_total{attack_type=\"ddos\"}[5m])", "legendFormat": "DDoS" },
+        { "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_created_total{attack_type=\"sqli\"}[5m])", "legendFormat": "SQLi" },
+        { "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_created_total{attack_type=\"brute_force\"}[5m])", "legendFormat": "Brute Force" },
+        { "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_incidents_created_total{attack_type=\"xss\"}[5m])", "legendFormat": "XSS" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Rules Evaluated per Cycle",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 1.5, "fillOpacity": 5 } } },
+      "targets": [{ "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_rules_evaluated_total[30s])", "legendFormat": "{{rule_name}}" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Blocklist Sync — IPs Synced vs Active",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 7 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 } } },
+      "targets": [
+        { "datasource": { "type": "prometheus" }, "expr": "aegisai_blocklist_active_entries", "legendFormat": "Active Blocked IPs" },
+        { "datasource": { "type": "prometheus" }, "expr": "increase(aegisai_blocklist_synced_total[1m])", "legendFormat": "Synced/min" }
+      ]
+    }
+  ]
+}

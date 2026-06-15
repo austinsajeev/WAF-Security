@@ -1,0 +1,177 @@
+groups:
+
+  # ===========================================================================
+  # Group 1: Gateway Health Alerts
+  # ===========================================================================
+  - name: gateway_health
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Nginx down on any gateway node
+      # -----------------------------------------------------------------------
+      - alert: GatewayNginxDown
+        expr: up{job="nginx_gateways"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 Nginx DOWN on {{ $labels.server_id }}"
+          description: |
+            Gateway node {{ $labels.server_id }} is not responding.
+            Site: {{ $labels.site_id }}
+            This means the site is unprotected or unreachable.
+            Immediate action required.
+          runbook_url: "https://wiki.internal/aegisai/runbooks/gateway-down"
+
+      # -----------------------------------------------------------------------
+      # WARNING: Gateway latency too high (WAF adding >50ms)
+      # -----------------------------------------------------------------------
+      - alert: GatewayHighLatency
+        expr: histogram_quantile(0.95, rate(nginx_http_request_duration_seconds_bucket[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "⚠️ High latency on {{ $labels.server_id }} (p95 > 50ms)"
+          description: |
+            95th percentile request latency is {{ $value | humanizeDuration }} on {{ $labels.server_id }}.
+            Check: ModSecurity rule performance, upstream app slowness, or CPU saturation.
+
+      # -----------------------------------------------------------------------
+      # WARNING: Filebeat agent stopped shipping logs (silent node)
+      # -----------------------------------------------------------------------
+      - alert: FilebeatAgentSilent
+        expr: up{job="filebeat_agents"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🔴 Filebeat SILENT on {{ $labels.server_id }}"
+          description: |
+            No metrics from Filebeat on {{ $labels.server_id }} for 3 minutes.
+            This could mean:
+              - Filebeat crashed (sudo systemctl status filebeat)
+              - mTLS cert expired
+              - Log pipeline broken
+            WARNING: You have ZERO visibility into this node's traffic right now.
+
+      # -----------------------------------------------------------------------
+      # INFO: High error rate (5xx responses spiking)
+      # -----------------------------------------------------------------------
+      - alert: GatewayHighErrorRate
+        expr: |
+          rate(nginx_http_requests_total{status=~"5.."}[5m])
+          / rate(nginx_http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "⚠️ >5% 5xx error rate on {{ $labels.server_id }}"
+          description: "Error rate is {{ $value | humanizePercentage }}. Check upstream app health."
+
+  # ===========================================================================
+  # Group 2: Security / Attack Alerts
+  # ===========================================================================
+  - name: security_attacks
+    interval: 15s             # faster evaluation for attack detection
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Mass WAF blocks (active attack in progress)
+      # -----------------------------------------------------------------------
+      - alert: MassWAFBlocks
+        expr: rate(modsec_blocked_requests_total[2m]) > 50
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🚨 ATTACK: >50 blocks/min on {{ $labels.site_id }} @ {{ $labels.server_id }}"
+          description: |
+            WAF block rate: {{ $value | humanize }} blocks/min
+            Site: {{ $labels.site_id }}
+            This indicates an active, sustained attack. Check dashboard for attacker IP and attack type.
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: Brute force — sustained auth failures from single IP
+      # -----------------------------------------------------------------------
+      - alert: BruteForceDetected
+        expr: |
+          sum by (remote_addr, site_id) (
+            rate(nginx_http_requests_total{
+              status=~"401|403",
+              uri=~".*(login|auth|signin).*"
+            }[5m])
+          ) > 10
+        for: 3m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "🚨 BRUTE FORCE: {{ $labels.remote_addr }} on {{ $labels.site_id }}"
+          description: |
+            IP {{ $labels.remote_addr }} is generating >10 auth failures/min.
+            Consider immediate IP block via blocklist API.
+
+      # -----------------------------------------------------------------------
+      # WARNING: Traffic spike (potential DDoS or viral traffic)
+      # -----------------------------------------------------------------------
+      - alert: TrafficSpike
+        expr: |
+          rate(nginx_http_requests_total[5m])
+          > 3 * avg_over_time(rate(nginx_http_requests_total[5m])[1h:5m])
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "⚠️ Traffic spike 3x normal baseline on {{ $labels.server_id }}"
+          description: |
+            Current rate: {{ $value | humanize }} req/s
+            Is this a product launch, viral event, or DDoS?
+
+  # ===========================================================================
+  # Group 3: Pipeline Health Alerts
+  # ===========================================================================
+  - name: pipeline_health
+    interval: 60s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # WARNING: ClickHouse slow (log ingestion lagging)
+      # -----------------------------------------------------------------------
+      - alert: ClickHouseSlowInserts
+        expr: ClickHouseMetrics_DelayedInserts > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "⚠️ ClickHouse insert lag on {{ $labels.instance }}"
+          description: |
+            ClickHouse is experiencing {{ $value }} delayed inserts.
+            Log data may be backing up. Check storage and merge queue.
+
+      # -----------------------------------------------------------------------
+      # CRITICAL: ClickHouse disk usage high
+      # -----------------------------------------------------------------------
+      - alert: ClickHouseDiskCritical
+        expr: |
+          (node_filesystem_size_bytes{mountpoint="/var/lib/clickhouse"} -
+           node_filesystem_free_bytes{mountpoint="/var/lib/clickhouse"})
+          / node_filesystem_size_bytes{mountpoint="/var/lib/clickhouse"} > 0.85
+        for: 10m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "🔴 ClickHouse disk >85% full on {{ $labels.instance }}"
+          description: |
+            Disk usage: {{ $value | humanizePercentage }}
+            Immediate action: run TTL enforcement or add storage.
+            Risk: ClickHouse stops accepting inserts at 95%.

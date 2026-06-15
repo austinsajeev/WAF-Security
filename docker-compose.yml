@@ -1,0 +1,255 @@
+services:
+
+  # -------------------- DATABASES --------------------
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: aegisai-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: aegisai_db
+      CLICKHOUSE_USER: aegisai
+      CLICKHOUSE_PASSWORD: aegisai_ch_pass
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aegisai-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: aegisai_db
+      POSTGRES_USER: aegisai
+      POSTGRES_PASSWORD: aegisai_pg_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegisai-redis
+    ports:
+      - "6379:6379"
+
+  # -------------------- API --------------------
+
+  api:
+    build: ./backend
+    container_name: aegisai-api
+    ports:
+      - "8000:8000"
+    environment:
+      JWT_SECRET: "${JWT_SECRET}"
+      AEGISAI_HMAC_SECRET: "${AEGISAI_HMAC_SECRET}"
+      PG_DSN: "postgresql://aegisai:${PG_PASSWORD}@postgres/aegisai_db"
+      CH_HOST: "clickhouse"
+      CH_USER: "aegisai"
+      CH_PASSWORD: "${CH_PASSWORD}"
+      CH_DB: "aegisai_db"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      - postgres
+      - clickhouse
+      - redis
+    volumes:
+      - //var/run/docker.sock:/var/run/docker.sock
+
+  dashboard:
+    build: ./dashboard
+    container_name: aegisai-dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  # -------------------- WORKERS --------------------
+
+  hmac_worker:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-hmac-worker
+    command: python workers/hmac_worker.py
+    environment:
+      CH_HOST: clickhouse
+      CH_PORT: 8123
+      CH_USER: aegisai
+      CH_PASSWORD: aegisai_ch_pass
+      CH_DB: aegisai_db
+      AEGISAI_HMAC_SECRET: dev-hmac-secret-change-in-production
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - redis
+      - clickhouse
+    volumes:
+      - ./pipeline/workers:/app/workers
+    restart: unless-stopped
+
+  correlation:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-correlation
+    command: python workers/correlation_engine.py
+    environment:
+      PG_DSN: "postgresql://aegisai:aegisai_pg_pass@postgres/aegisai_db"
+      REDIS_URL: "redis://redis:6379/0"
+      CH_HOST: clickhouse
+      CH_USER: aegisai
+      CH_PASSWORD: aegisai_ch_pass
+      CH_DB: aegisai_db
+    depends_on:
+      - postgres
+      - clickhouse
+      - redis
+    restart: unless-stopped
+
+  blocklist_sync:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-blocklist-sync
+    command: python workers/blocklist_sync.py
+    environment:
+      PG_DSN: "postgresql://aegisai:aegisai_pg_pass@postgres/aegisai_db"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  geo_enricher:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-geo-enricher
+    command: python workers/geo_enricher.py
+    depends_on:
+      - clickhouse
+    restart: unless-stopped
+
+  feature_builder:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-feature-builder
+    command: python workers/feature_builder.py
+    depends_on:
+      - clickhouse
+    restart: unless-stopped
+
+  ml_worker:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile.workers
+    container_name: aegisai-ml-worker
+    command: python workers/ml_worker.py
+    environment:
+      CH_HOST: clickhouse
+      CH_USER: aegisai
+      CH_PASSWORD: aegisai_ch_pass
+      CH_DB: aegisai_db
+      REDIS_URL: redis://redis:6379/0
+      MODEL_PATH: /app/models/anomaly_detector.joblib
+      ML_INTERVAL: "300"
+    depends_on:
+      - clickhouse
+      - redis
+    volumes:
+      - ml_models:/app/models
+      - ./pipeline/workers:/app/workers
+    restart: unless-stopped
+
+  # -------------------- TEST LAB --------------------
+
+  test_app:
+    image: kennethreitz/httpbin
+    container_name: aegisai-test-app
+    restart: unless-stopped
+
+  gateway:
+    image: owasp/modsecurity-crs:nginx-alpine
+    container_name: aegisai-gateway
+    user: root
+    ports:
+      - "8888:8080"
+    environment:
+      - BACKEND=http://test_app:80
+      - PROXY_TIMEOUT=60
+      - PARANOIA=1
+      - PORT=8080
+      - MODSEC_RULE_ENGINE=On
+    volumes:
+      - ./gateway/nginx/aegisai_logging.conf:/etc/nginx/conf.d/aegisai_logging.conf:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - test_app
+    restart: unless-stopped
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.10.2
+    container_name: aegisai-filebeat
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./gateway/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - nginx_logs:/var/log/nginx:ro
+      - modsec_logs:/var/log/modsec:ro
+    depends_on:
+      - redis
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        RUN pip install requests
+        CMD ["python", "/app/tools/orchestrator.py"]
+    container_name: aegisai-orchestrator
+    volumes:
+      - ./tools:/app/tools:ro
+    environment:
+      - GATEWAY_URL=http://gateway:8080
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  # -------------------- MONITORING --------------------
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: aegisai-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: aegisai-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: aegisai123
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/security_posture.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+# -------------------- VOLUMES --------------------
+
+volumes:
+  clickhouse_data:
+  postgres_data:
+  nginx_logs:
+  modsec_logs:
+  grafana_data:
+  prometheus_data:
+  ml_models:

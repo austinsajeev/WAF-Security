@@ -1,0 +1,92 @@
+# =============================================================================
+# AegisAI-X — Prometheus Scrape Configuration
+# Monitors: Gateway Nodes, Filebeat Agents, ClickHouse, System Metrics
+# Version: 1.0.0
+# =============================================================================
+
+global:
+  scrape_interval:     15s     # how often to pull metrics
+  evaluation_interval: 15s     # how often to evaluate alert rules
+  scrape_timeout:      10s
+
+  # Labels added to ALL metrics (identify this Prometheus instance in Grafana)
+  external_labels:
+    environment: 'production'
+    system:      'aegisai-x'
+
+# =============================================================================
+# Alert Rules Configuration
+# =============================================================================
+rule_files:
+  - /etc/prometheus/rules/gateway_alerts.yml
+  - /etc/prometheus/rules/pipeline_alerts.yml
+
+# =============================================================================
+# Scrape Targets
+# =============================================================================
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Prometheus Self-Monitoring
+  # ---------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ---------------------------------------------------------------------------
+  # 2. Gateway Nodes (Commented out for local Docker dev)
+  # ---------------------------------------------------------------------------
+  # - job_name: 'nginx_gateways'
+  #   metrics_path: /metrics
+  #   file_sd_configs:
+  #     - files:
+  #         - /etc/prometheus/targets/gateways/*.json
+
+  # ---------------------------------------------------------------------------
+  # 3. ClickHouse Metrics
+  # ---------------------------------------------------------------------------
+  - job_name: 'clickhouse'
+    static_configs:
+      - targets: ['aegisai-clickhouse:8123']
+    metrics_path: /metrics
+    scheme: http
+
+  # ---------------------------------------------------------------------------
+  # 4. FastAPI Backend Metrics
+  # ---------------------------------------------------------------------------
+  - job_name: 'aegisai_api'
+    static_configs:
+      - targets: ['aegisai-api:8000']
+    metrics_path: /metrics
+
+  # ---------------------------------------------------------------------------
+  # 5. HMAC Validation Worker
+  # ---------------------------------------------------------------------------
+  - job_name: 'aegisai_hmac_worker'
+    static_configs:
+      - targets: ['aegisai-hmac-worker:8000']
+    metrics_path: /metrics
+
+  # ---------------------------------------------------------------------------
+  # 6. Correlation Engine Worker
+  # ---------------------------------------------------------------------------
+  - job_name: 'aegisai_correlation'
+    static_configs:
+      - targets: ['aegisai-correlation:9101']
+    metrics_path: /metrics
+
+  # ---------------------------------------------------------------------------
+  # 7. Blocklist Sync Worker
+  # ---------------------------------------------------------------------------
+  - job_name: 'aegisai_blocklist_sync'
+    static_configs:
+      - targets: ['aegisai-blocklist-sync:9102']
+    metrics_path: /metrics
+
+  # ---------------------------------------------------------------------------
+  # 8. ML Worker
+  # ---------------------------------------------------------------------------
+  - job_name: 'aegisai_ml_worker'
+    static_configs:
+      - targets: ['aegisai-ml-worker:8001']
+    metrics_path: /metrics
